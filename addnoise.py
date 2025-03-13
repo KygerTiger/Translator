@@ -12,7 +12,7 @@ import json
 login("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")
 
 # Choose your target language (must be available in Common Voice)
-language = "es"
+language = "zh-HK"
 
 '''
  Available: ['ab', 'af', 'am', 'ar', 'as', 'ast', 'az', 'ba', 'bas', 'be', 'bg', 'bn', 'br', 'ca', 'ckb',
@@ -27,9 +27,9 @@ language = "es"
 '''
 
 # Directory with noise audio files (make sure these are .wav files)
-NOISE_DIR = "/Users/nigel/Documents/converted_data"
+NOISE_DIR = r"C:\Users\nlk3212\Documents\Converted_noise"
 # Output directory to save noisy audio and transcript files
-OUTPUT_DIR = f"/Users/nigel/Documents/withNoise/{language}"
+OUTPUT_DIR = rf"C:\Users\nlk3212\Documents\noisyData\{language}"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # List all noise files from NOISE_DIR
@@ -69,7 +69,7 @@ def create_noise_with_intervals(target_duration_ms, noise_files,
 
 print(f"Processing language: {language}")
 # Load the Common Voice dataset (streaming)
-ds = load_dataset("mozilla-foundation/common_voice_16_1", language, split="train", streaming=True)
+ds = load_dataset("mozilla-foundation/common_voice_16_1", language, split="train", streaming=True, trust_remote_code=True)
 # Cast the audio column to a specific sampling rate (16 kHz)
 ds = ds.cast_column("audio", Audio(sampling_rate=16000))
 
@@ -129,7 +129,7 @@ for idx, example in enumerate(ds):
         print(f"✅ Saved: {audio_filename} with transcript")
 
         # Limit to a certain number of examples (optional)
-        if idx >= 2000:
+        if idx >= 100:
             break
 
     except Exception as e:

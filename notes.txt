@@ -1,0 +1,59 @@
+Package	Recommended Version	Notes
+pydub	0.25.1	Compatible with Python 3.9+, requires ffmpeg installed.
+numpy	1.24.4	Stable with Python 3.9 and audio manipulation.
+datasets	2.17.1	For loading Hugging Face datasets.
+huggingface_hub	0.20.3	For login() and accessing datasets.
+ffmpeg	latest stable	Must be installed separately on your system for pydub to work.
+Python: 3.9 or 3.10 (standard libraries such as os, json, argparse, and math are included)
+pydub: 0.25.1 (plus ensure FFmpeg is installed on your system)
+numpy: 1.24.4
+datasets: 2.17.1
+huggingface_hub: 0.20.3
+librosa: 0.10.0
+soundfile: 0.12.1 (required by the preprocessing script)
+torch: 2.0.1
+transformers: 4.30.0
+evaluate: 0.4.0
+tqdm: 4.64.1
+accelerate>=0.26.0
+transformers[torch]
+d
+
+pip install torch==2.0.1 librosa==0.10.0 numpy==1.24.4 transformers==4.30.0 datasets==2.17.1 evaluate==0.4.0 tqdm==4.64.1 huggingface_hub==0.20.3
+pip install -r requirements.txt
+venv:
+.venv\Scripts\activate
+deactivate
+
+
+1st create noisy dataset with addnoise
+
+2nd Create a singular manifest combining all separate from noisy data create1Manifest
+python create1Manifest.py --input_dir "C:\Users\nlk3212\Documents\preprocessed_data" --manifest_path "C:\Users\nlk3212\Documents\preprocessed_data\manifest.jsonl" --compute_duration
+
+3rd preprocess data with preprocess
+python preprocess.py --manifest_in "C:\Users\nlk3212\Documents\noisyData\manifest.jsonl" --output_dir "C:\Users\nlk3212\Documents\preprocessed" --manifest_out "C:\Users\nlk3212\Documents\preprocessed\preprocessed_manifest.jsonl" --target_sr 16000
+
+4th Split data for training and testing using splitJSONL
+python splitJSONL.py --manifest_in "C:\Users\nlk3212\Documents\preprocessed\preprocessed_manifest.jsonl" --train_out "C:\Users\nlk3212\Documents\preprocessed\train_manifest.jsonl" --eval_out "C:\Users\nlk3212\Documents\preprocessed\eval_manifest.jsonl" --split_ratio 0.85
+
+
+5th start fine tuning process
+python fineTuneFast.py --train_manifest "C:\Users\nlk3212\Documents\preprocessed\train_manifest.jsonl" --eval_manifest "C:\Users\nlk3212\Documents\preprocessed\eval_manifest.jsonl" --output_dir "C:\Users\nlk3212\Documents\TunedTests\whispertunedEX2" --num_train_epochs 5 --per_device_train_batch_size 4 --per_device_eval_batch_size 4 --learning_rate 5e-5
+
+
+What we get from the code?
+
+config: contains architecture & hyperparameters(model size, layer configs)
+generation_config: custom settings passed (max_length, suppress_tokens)
+tokenizer_config, vocab, merges : define tokenizer config (important for inference)
+pytorch_model, .safetensors: store the actual weights (we load these when using the model)
+training_args: Stores all the Seq2SeqTrainingArguments used during training. (learning rate, batch size, epochs, output directory)
+special_tokens_map: Maps special token types (like [CLS], [SEP], <pad>, etc.) to actual token values (BOS, EOS, padding & unknown tokens)
+normalizer: Contains rules for text normalization. (caps, spaces)
+added_tokens: Stores any custom tokens added to the tokenizer (e.g., domain-specific terms or noise tags like [NOISE]).
+
+use eval with custom noisy data and transcription to test models accuracy and WER
+
+
+need to run scratch.py to initialize model for using fine tuned weights

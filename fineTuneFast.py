@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 import os
 import argparse
-import torch
-from torch.nn.utils.rnn import pad_sequence
-import librosa
 import math
 import numpy as np
+import torch
+import librosa
+import torch.nn.functional as F
+import torch.backends.cudnn as cudnn
+cudnn.benchmark = True
+
 from datasets import load_dataset
 from evaluate import load as load_metric
 from transformers import (
@@ -14,12 +17,63 @@ from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     TrainerCallback,
+    DataCollatorForSeq2Seq,
+    GenerationConfig,
 )
 from tqdm.auto import tqdm
 from huggingface_hub import HfApi, HfFolder
+from dataclasses import dataclass
+from typing import Any, Dict, List, Union
 
+# --- Set up generation configuration ---
+gen_config = GenerationConfig(
+    max_length=448,
+    suppress_tokens=[1, 2, 7, 8, 9, 10, 14, 25, 26, 27, 28, 29, 31, 58, 59, 60, 61, 62, 63, 90, 91, 92, 93, 359, 503, 522, 542, 873, 893, 902, 918, 922, 931, 1350, 1853, 1982, 2460, 2627, 3246, 3253, 3268, 3536, 3846, 3961, 4183, 4667, 6585, 6647, 7273, 9061, 9383, 10428, 10929, 11938, 12033, 12331, 12562, 13793, 14157, 14635, 15265, 15618, 16553, 16604, 18362, 18956, 20075, 21675, 22520, 26130, 26161, 26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425, 49870, 50254, 50258, 50358, 50359, 50360, 50361, 50362],
+    begin_suppress_tokens=[220, 50257]
+)
 
+# ---------------------------
+# Data Collator for Speech Seq2Seq Tasks
+# ---------------------------
+@dataclass
+class DataCollatorSpeechSeq2SeqWithPadding:
+    processor: Any
+    decoder_start_token_id: int
+    max_target_length: int = 448  # Maximum allowed length for label tokens
+
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        # Convert and pad audio features to fixed length 3000 time steps.
+        input_features = [feature["input_features"] for feature in features]
+        padded_audio = []
+        for feat in input_features:
+            if not isinstance(feat, torch.Tensor):
+                feat = torch.tensor(feat)
+            current_length = feat.size(-1)
+            if current_length < 3000:
+                pad_amount = 3000 - current_length
+                feat = F.pad(feat, (0, pad_amount), mode="constant", value=0)
+            elif current_length > 3000:
+                feat = feat[..., :3000]
+            padded_audio.append(feat)
+        padded_audio = torch.stack(padded_audio)
+
+        # Process labels using the tokenizer's pad method.
+        label_features = [{"input_ids": feature["labels"]} for feature in features]
+        labels_batch = self.processor.tokenizer.pad(
+            label_features, padding="longest", return_tensors="pt", return_attention_mask=True
+        )
+        labels = labels_batch["input_ids"].masked_fill(
+            labels_batch.attention_mask.ne(1), -100
+        )
+        if labels.shape[1] > self.max_target_length:
+            labels = labels[:, :self.max_target_length]
+        if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
+            labels = labels[:, 1:]
+        return {"input_features": padded_audio, "labels": labels}
+
+# ---------------------------
 # Custom progress callback with tqdm
+# ---------------------------
 class ProgressPercentageCallback(TrainerCallback):
     def __init__(self, total_steps):
         self.total_steps = total_steps
@@ -35,7 +89,9 @@ class ProgressPercentageCallback(TrainerCallback):
         self.pbar.close()
         return control
 
-
+# ---------------------------
+# Main training function
+# ---------------------------
 def main():
     parser = argparse.ArgumentParser(description="Fine tune Whisper model with JSON Lines manifest")
     parser.add_argument("--model_name_or_path", type=str, default="openai/whisper-base",
@@ -46,11 +102,9 @@ def main():
                         help="Path to evaluation dataset JSON Lines file with same format")
     parser.add_argument("--output_dir", type=str, default="./whisper_finetuned",
                         help="Directory to save the fine tuned model")
-    parser.add_argument("--num_train_epochs", type=int, default=1, help="Number of training epochs")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4,
-                        help="Train batch size")  # increased default
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=4,
-                        help="Eval batch size")  # increased default
+    parser.add_argument("--num_train_epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="Train batch size")
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="Eval batch size")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate")
     parser.add_argument("--test_audio", type=str, default=None,
                         help="Path to an audio file for transcription testing after fine tuning")
@@ -62,6 +116,10 @@ def main():
     print("Loading model and processor...")
     model = WhisperForConditionalGeneration.from_pretrained(args.model_name_or_path)
     processor = WhisperProcessor.from_pretrained(args.model_name_or_path)
+    # Set the generation config's start token values using the tokenizer’s bos token
+    gen_config.bos_token_id = processor.tokenizer.bos_token_id
+    gen_config.decoder_start_token_id = processor.tokenizer.bos_token_id
+    model.generation_config = gen_config
 
     # Move model to GPU if available
     if torch.cuda.is_available():
@@ -72,23 +130,22 @@ def main():
     train_dataset = load_dataset("json", data_files=args.train_manifest, split="train")
     eval_dataset = load_dataset("json", data_files=args.eval_manifest, split="train")
 
-    # Rename "text" to "transcription"
+    # Rename "text" to "transcription" for consistency
     if "text" in train_dataset.column_names:
         train_dataset = train_dataset.rename_column("text", "transcription")
     if "text" in eval_dataset.column_names:
         eval_dataset = eval_dataset.rename_column("text", "transcription")
 
-    # For quick testing, select a small subset (remove or adjust for full run)
-    train_dataset = train_dataset.select(range(10))
-    eval_dataset = eval_dataset.select(range(10))
+    # Optionally, filter out entries with empty transcriptions if needed.
+    train_dataset = train_dataset.filter(lambda x: x.get("transcription", "").strip() != "")
+    eval_dataset = eval_dataset.filter(lambda x: x.get("transcription", "").strip() != "")
 
-    # 3. Define the preprocessing function (consider removing debug prints in production)
+    print("Training dataset size after filtering:", len(train_dataset))
+    print("Evaluation dataset size after filtering:", len(eval_dataset))
+    # Use entire dataset for fine-tuning (no subset selection)
+
+    # 3. Define the preprocessing function.
     def preprocess_function(examples):
-        # (Optional) Debug prints can be commented out after testing:
-        # print("Batch keys:", list(examples.keys()))
-        # print("Sample audio_filepath:", examples["audio_filepath"][:3])
-        # print("Sample transcription:", examples["transcription"][:3])
-
         inputs = []
         for audio_file in examples["audio_filepath"]:
             try:
@@ -98,10 +155,10 @@ def main():
                 speech_array = np.zeros(16000, dtype=np.float32)
             inputs.append(speech_array)
 
-        # Let the processor handle padding automatically
-        processed = processor(inputs, sampling_rate=16000, return_tensors="pt", padding=True)
-        # print("Processed input features shape:", processed.input_features.shape)
-
+        processed = processor(
+            inputs, sampling_rate=16000, return_tensors="pt",
+            padding="max_length", max_length=3000
+        )
         model_inputs = {"input_features": processed.input_features}
 
         try:
@@ -109,14 +166,13 @@ def main():
                 examples["transcription"],
                 padding=True,
                 truncation=True,
-                return_tensors="pt"
+                return_tensors="pt",
+                return_attention_mask=True
             )
         except Exception as e:
             print("Error tokenizing transcription:", e)
             tokenized = {"input_ids": torch.zeros((len(examples["transcription"]), 20), dtype=torch.long)}
-
         model_inputs["labels"] = tokenized.input_ids
-        # print(f"Processed {len(inputs)} audio files for a batch.")
         return model_inputs
 
     # 4. Map the preprocessing function (using parallel processing)
@@ -128,7 +184,7 @@ def main():
         preprocess_function,
         batched=True,
         remove_columns=original_train_columns,
-        num_proc=4  # Increase based on available CPU cores
+        num_proc=4
     )
     eval_dataset = eval_dataset.map(
         preprocess_function,
@@ -137,53 +193,24 @@ def main():
         num_proc=4
     )
 
-    # 4.5. Define custom data collator for efficient padding of audio features and labels
-    def custom_data_collator(features):
-        processed_features = []
-        for f in features:
-            feat = f["input_features"]
-            if not isinstance(feat, torch.Tensor):
-                feat = torch.tensor(feat)
-            processed_features.append(feat)
-
-        # Pad along the time dimension (assumes shape (80, seq_len))
-        max_seq_len = max(feat.shape[1] for feat in processed_features)
-        padded_input_features = []
-        for feat in processed_features:
-            seq_len = feat.shape[1]
-            pad_amount = max_seq_len - seq_len
-            if pad_amount > 0:
-                pad_tensor = torch.zeros(feat.shape[0], pad_amount, dtype=feat.dtype)
-                feat = torch.cat([feat, pad_tensor], dim=1)
-            padded_input_features.append(feat)
-        padded_input_features = torch.stack(padded_input_features, dim=0)
-
-        label_tensors = []
-        for f in features:
-            lab = f["labels"]
-            if not isinstance(lab, torch.Tensor):
-                lab = torch.tensor(lab)
-            label_tensors.append(lab)
-        padded_labels = torch.nn.utils.rnn.pad_sequence(label_tensors, batch_first=True, padding_value=-100)
-        return {"input_features": padded_input_features, "labels": padded_labels}
-
-    # 5. Set up training arguments (using max_steps for a quick run; remove for full training)
+    # 5. Set up training arguments (using the full dataset)
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
-        max_steps=100,  # For quick testing; remove or adjust for full training
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         learning_rate=args.learning_rate,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         predict_with_generate=True,
         fp16=torch.cuda.is_available(),
         logging_steps=100,
-        dataloader_pin_memory=True,  # Enables faster host-to-device transfers
+        dataloader_pin_memory=True,
+        remove_unused_columns=False,
+        gradient_accumulation_steps=2,
     )
 
-    # 6. Load evaluation metric (Word Error Rate)
+    # 6. Load evaluation metric (WER)
     metric = load_metric("wer")
 
     def compute_metrics(eval_pred):
@@ -198,30 +225,37 @@ def main():
     steps_per_epoch = math.ceil(len(train_dataset) / training_args.per_device_train_batch_size)
     total_steps = steps_per_epoch * training_args.num_train_epochs
 
-    # 8. Initialize Trainer with custom data collator and progress callback
+    # 8. Initialize a dedicated data collator using our custom class.
+    data_collator = DataCollatorSpeechSeq2SeqWithPadding(
+        processor=processor,
+        decoder_start_token_id=processor.tokenizer.bos_token_id,
+        max_target_length=448,
+    )
+
+    # 9. Initialize the Trainer using processing_class to avoid deprecated tokenizer param.
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=processor.tokenizer,  # used for generation/decoding
+        processing_class=processor.tokenizer,
         compute_metrics=compute_metrics,
         callbacks=[ProgressPercentageCallback(total_steps=total_steps)],
-        data_collator=custom_data_collator,
+        data_collator=data_collator,
     )
 
-    # 9. Fine-tuning
+    # 10. Fine-tuning
     print("Starting fine tuning...")
     trainer.train()
     trainer.save_model(args.output_dir)
     print(f"Model saved to {args.output_dir}")
-
-    # 10. Evaluate the fine-tuned model
+    processor.save_pretrained(args.output_dir)
+    # 11. Evaluate the fine-tuned model
     print("Evaluating the fine tuned model...")
     results = trainer.evaluate()
     print("Evaluation results:", results)
-
-    # 11. Optionally test a single audio file
+    '''
+    # 12. Optionally test a single audio file
     if args.test_audio:
         print(f"Transcribing test audio: {args.test_audio}")
         speech_array, _ = librosa.load(args.test_audio, sr=16000)
@@ -236,15 +270,14 @@ def main():
             f.write(transcription)
         print(f"Transcription saved to {test_outfile}")
 
-    # 12. Optionally push the model to the Hugging Face Hub
+    # 13. Optionally push the fine-tuned model to the Hugging Face Hub
     if args.push_to_hub:
         print("Pushing model to Hugging Face Hub...")
         token = HfFolder.get_token()
         if token is None:
             print("No Hugging Face token found. Please run 'huggingface-cli login' first.")
         else:
-            trainer.push_to_hub()
-
+            trainer.push_to_hub() '''
 
 if __name__ == "__main__":
     main()

@@ -78,8 +78,8 @@ def main():
     if "text" in eval_dataset.column_names:
         eval_dataset = eval_dataset.rename_column("text", "transcription")
 
-    train_dataset = train_dataset.select(range(10))
-    eval_dataset = eval_dataset.select(range(10))
+    #train_dataset = train_dataset.select(range(10))
+    #eval_dataset = eval_dataset.select(range(10))
 
     # 3. Define the preprocessing function
     def preprocess_function(examples):
@@ -101,7 +101,7 @@ def main():
             inputs.append(speech_array)
 
         # Let the processor handle padding automatically
-        processed = processor(inputs, sampling_rate=16000, return_tensors="pt", padding=True)
+        processed = processor(inputs, sampling_rate=16000, return_tensors="pt", padding="max_length", max_length=3000)
         print("Processed input features shape:", processed.input_features.shape)
 
         # Build model inputs dictionary
@@ -217,12 +217,12 @@ def main():
     steps_per_epoch = math.ceil(len(train_dataset) / training_args.per_device_train_batch_size)
     total_steps = steps_per_epoch * training_args.num_train_epochs
 
-    # NEW: Create a dedicated Data Collator for Seq2Seq that handles padding
-    # data_collator = DataCollatorForSeq2Seq(
-    #    tokenizer=processor.tokenizer,
-    #    model=model,
-    #    padding=True  # Ensures that inputs and labels are padded to uniform lengths
-    #)
+     #NEW: Create a dedicated Data Collator for Seq2Seq that handles padding
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=processor.tokenizer,
+        model=model,
+        padding=True  # Ensures that inputs and labels are padded to uniform lengths
+    )
 
 
     # 8. Initialize Trainer with custom progress callback
@@ -234,7 +234,7 @@ def main():
         tokenizer=processor.tokenizer,  # used for generation/decoding
         compute_metrics=compute_metrics,
         callbacks=[ProgressPercentageCallback(total_steps=total_steps)],
-        data_collator=custom_data_collator,  # use the custom collator
+        data_collator=data_collator,  # use the custom collator
     )
 
     # 9. Fine-tuning
@@ -253,7 +253,7 @@ def main():
         print(f"Transcribing test audio: {args.test_audio}")
         speech_array, _ = librosa.load(args.test_audio, sr=16000)
         input_features = processor(speech_array, sampling_rate=16000, return_tensors="pt").input_features
-        generated_ids = model.generate(input_features)
+        generated_ids = model.generate(input_features, max_new_tokens=448)
         transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print("Test audio transcription:", transcription)
         # Save transcription to a file

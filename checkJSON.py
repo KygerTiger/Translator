@@ -15,7 +15,7 @@ def check_jsonl_manifest(manifest_path):
                 print(f"  Contents: {line.strip()}")
 
 # Replace with your manifest file path
-manifest_file = '/Users/nigel/Documents/withNoise_preprocessed/preprocessed_manifest.json'
+manifest_file = r'C:\Users\nlk3212\Documents\preprocessed\preprocessed_manifest.jsonl'
 check_jsonl_manifest(manifest_file)
 
 def validate_jsonl(filepath):
